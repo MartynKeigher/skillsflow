@@ -1,0 +1,53 @@
+name: Publish index
+
+on:
+  schedule:
+    - cron: "17 4 * * *"  # daily, 04:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-index
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # A fine-grained token with public read access lets discovery use code search.
+      # Without the secret, the workflow token is used and discovery may be skipped.
+      GITHUB_TOKEN: ${{ secrets.SKILLSFLOW_TOKEN || github.token }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+
+      - name: Download the previous index
+        run: gh release download --repo "$GITHUB_REPOSITORY" --pattern index.json --dir prev || echo "no previous release"
+
+      - name: Build
+        run: |
+          args=()
+          [ -f prev/index.json ] && args+=(--previous prev/index.json)
+          python -m skillsflow build --sources sources.yaml --out dist "${args[@]}"
+
+      - name: Publish release
+        run: |
+          tag="index-$(date -u +%Y-%m-%d-%H%M)"
+          gh release create "$tag" dist/index.json dist/index.pretty.json dist/SUMMARY.md \
+            --repo "$GITHUB_REPOSITORY" --title "Index $(date -u +%Y-%m-%d)" \
+            --notes-file dist/SUMMARY.md --latest
+
+      - name: Keep the 30 newest index releases
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | startswith("index-"))] | sort_by(.createdAt) | reverse | .[30:] | .[].tagName' |
+          while read -r tag; do
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          done

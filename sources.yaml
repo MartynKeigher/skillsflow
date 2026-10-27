@@ -1,0 +1,30 @@
+# Repositories SkillsFlow crawls. Each one is scanned for SKILL.md files and,
+# if it has one, its .claude-plugin/marketplace.json. Plugins in a marketplace
+# that live in other GitHub repos are followed automatically.
+
+repos:
+  - anthropics/skills
+  - anthropics/claude-plugins-official
+  - anthropics/claude-code
+  - obra/superpowers
+
+# Owners whose skills are marked "official".
+trusted_owners:
+  - anthropics
+
+# owner/repo values that are never crawled, even when a marketplace points at them.
+denylist: []
+
+settings:
+  follow_external: true
+  max_external_repos: 400
+
+# GitHub code search for more repos. Needs GITHUB_TOKEN; skipped without one.
+discovery:
+  enabled: true
+  queries:
+    - "filename:SKILL.md"
+    - "filename:marketplace.json path:.claude-plugin"
+  max_results_per_query: 1000
+  min_stars: 5
+  max_repos: 300
