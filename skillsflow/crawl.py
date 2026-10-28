@@ -45,6 +45,11 @@ def _read_json(path: Path) -> dict | None:
         return None
 
 
+def _plain(value):
+    """Frontmatter as JSON-safe values: YAML dates and other objects become strings."""
+    return json.loads(json.dumps(value, default=str))
+
+
 def _author_name(author) -> str | None:
     if isinstance(author, dict):
         return author.get("name")
@@ -70,7 +75,17 @@ class Crawler:
     # -- repositories ---------------------------------------------------------
 
     def crawl_repo(self, slug: str) -> None:
-        """Index every skill in a repository, plus its marketplace if it has one."""
+        """Index every skill in a repository, plus its marketplace if it has one.
+
+        A failure is recorded in `errors` instead of stopping the whole crawl.
+        """
+        try:
+            self._crawl_repo(slug)
+        except Exception as exc:
+            log.exception("crawl of %s failed", slug)
+            self.errors.append({"repo": slug, "error": f"{type(exc).__name__}: {exc}"})
+
+    def _crawl_repo(self, slug: str) -> None:
         if slug.lower() in self.denylist:
             return
         checkout = self.fetcher.fetch(slug)
@@ -79,7 +94,11 @@ class Crawler:
             return
         self._note_repo(checkout)
         for skill_dir in self._find_skill_dirs(checkout.path):
-            self._skill(checkout, skill_dir)
+            try:
+                self._skill(checkout, skill_dir)
+            except Exception as exc:
+                log.exception("skill %s:%s failed", slug, skill_dir)
+                self.errors.append({"repo": slug, "path": skill_dir, "error": f"{type(exc).__name__}: {exc}"})
         mp_file = checkout.path / ".claude-plugin" / "marketplace.json"
         if mp_file.is_file():
             self._marketplace(checkout, mp_file)
@@ -125,13 +144,13 @@ class Crawler:
             "id": skill_id,
             "name": name,
             "description": description,
-            "license": fields.get("license") if isinstance(fields.get("license"), str) else None,
+            "license": str(fields["license"]) if fields.get("license") else None,
             "repo": checkout.slug,
             "path": rel_dir,
             "commit": checkout.commit,
             "url": f"https://github.com/{checkout.slug}/tree/{checkout.commit}/{rel_dir}".rstrip("/"),
-            "frontmatter": {k: fields[k] for k in sorted(fields) if k not in ("name", "description")
-                            and isinstance(fields[k], (str, int, float, bool, list))},
+            "frontmatter": _plain({str(k): fields[k] for k in sorted(fields, key=str)
+                                   if k not in ("name", "description")}),
             "lines": body.count("\n") + 1,
             "files": scan["files"],
             "security": security.summarize(scan),
@@ -172,7 +191,8 @@ class Crawler:
                     self._plugin(checkout, name, entry, plugin_root)
                 except Exception as exc:  # one bad entry must not sink the marketplace
                     log.exception("plugin %s@%s failed", entry.get("name"), name)
-                    self.errors.append({"repo": checkout.slug, "plugin": entry.get("name"), "error": str(exc)})
+                    self.errors.append({"repo": checkout.slug, "plugin": entry.get("name"),
+                                        "error": f"{type(exc).__name__}: {exc}"})
 
     def _resolve_source(self, checkout: Checkout, source, plugin_root: str | None):
         """Return (checkout or None, path in it or None, descriptor for the index)."""

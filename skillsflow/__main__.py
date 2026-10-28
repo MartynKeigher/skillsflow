@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -29,10 +30,19 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(levelname)s %(name)s: %(message)s")
     github = None if args.offline_metadata else GitHub()
-    with tempfile.TemporaryDirectory(prefix="skillsflow-") as tmp:
-        fetcher = GitFetcher(args.cache or Path(tmp))
-        index = build(args.sources, args.out, fetcher, github, previous=args.previous, extra_repos=args.repo)
+    try:
+        with tempfile.TemporaryDirectory(prefix="skillsflow-") as tmp:
+            fetcher = GitFetcher(args.cache or Path(tmp))
+            index = build(args.sources, args.out, fetcher, github, previous=args.previous, extra_repos=args.repo)
+    except Exception as exc:
+        if os.environ.get("GITHUB_ACTIONS"):
+            # Annotations are readable through the API even when the raw log isn't.
+            print(f"::error title=skillsflow build failed::{type(exc).__name__}: {exc}".replace("\n", " "))
+        raise
     c = index["counts"]
+    if os.environ.get("GITHUB_ACTIONS"):
+        for err in index["errors"][:10]:
+            print(f"::warning title=skillsflow::{err}".replace("\n", " "))
     print(f"wrote {args.out}/index.json: {c['skills']} skills, {c['plugins']} plugins, "
           f"{c['marketplaces']} marketplaces, {len(index['errors'])} errors")
     return 0
