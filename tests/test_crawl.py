@@ -78,3 +78,21 @@ def test_marketplace_record(repos):
     mp = crawl(repos).marketplaces["acme"]
     assert mp["add_command"] == "claude plugin marketplace add acme/skills"
     assert len(mp["plugins"]) == 6
+
+
+def test_frontmatter_dates_are_json_safe(repos):
+    import json
+    from conftest import write
+
+    write(repos / "acme__skills", "skills/dated/SKILL.md",
+          "---\nname: dated\ndescription: d\nupdated: 2026-01-02\ntags: [a, 2026-01-03]\n---\nbody\n")
+    skill = crawl(repos).skills["acme/skills:skills/dated"]
+    assert skill["frontmatter"] == {"updated": "2026-01-02", "tags": ["a", "2026-01-03"]}
+    json.dumps(skill)
+
+
+def test_one_bad_repo_does_not_stop_the_crawl(repos, monkeypatch):
+    c = Crawler(LocalFetcher(repos), None)
+    monkeypatch.setattr(c, "_crawl_repo", lambda slug: (_ for _ in ()).throw(RuntimeError("boom")))
+    c.crawl_repo("acme/skills")
+    assert c.errors == [{"repo": "acme/skills", "error": "RuntimeError: boom"}]

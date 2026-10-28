@@ -57,7 +57,7 @@ def discover(github, discovery: dict) -> list[str]:
             continue
         if (meta.get("stars") or 0) >= min_stars:
             kept.append(slug)
-    kept.sort(key=lambda s: -(github.repo(s) or {}).get("stars", 0))
+    kept.sort(key=lambda s: -((github.repo(s) or {}).get("stars") or 0))
     return kept[: discovery.get("max_repos", 300)]
 
 
