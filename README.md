@@ -7,8 +7,10 @@ There's no single official list of skills, so SkillsFlow makes one. Every day a 
 The app downloads it from:
 
 ```
-https://github.com/MartynKeigher/skillsflow/releases/latest/download/index.json
+https://github.com/MartynKeigher/skillsflow/releases/latest/download/index.json.gz
 ```
+
+File lists and full security findings are published next to it in 256 `details-<bb>.json` files, so the catalog stays small enough to download daily and ship inside the app. The app fetches the one it needs when you open an item.
 
 ## What it collects
 
@@ -72,7 +74,7 @@ python -m pytest
 
 ## Publishing
 
-`.github/workflows/publish-index.yml` runs daily and on demand. It downloads the previous `index.json`, builds a new one, publishes it as a release tagged `index-YYYY-MM-DD-HHMM`, and keeps the 30 newest. For code-search discovery, add a fine-grained personal access token with public repository read access as the `SKILLSFLOW_TOKEN` secret.
+`.github/workflows/publish-index.yml` runs daily and on demand. It downloads the previous `index.json`, builds a new one, publishes it with its detail files as a release tagged `index-YYYY-MM-DD-HHMM`, and keeps the 30 newest. Add a fine-grained personal access token with public repository read access as the `SKILLSFLOW_TOKEN` secret. It's needed for code-search discovery, and for star counts: the crawl looks up about 2,000 repositories, more than the workflow's own token is allowed per hour. Without it, star counts stop when that limit is reached.
 
 ## Credits
 

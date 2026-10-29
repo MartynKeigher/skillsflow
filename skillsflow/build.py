@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import gzip
+import hashlib
 import json
 import logging
 import urllib.request
@@ -17,6 +19,8 @@ log = logging.getLogger(__name__)
 
 HISTORY_DAYS = 30
 TREND_DAYS = 7
+DETAIL_BUCKETS = 256  # two hex digits of the SHA-1 of an item's id
+SEVERITIES = ("low", "medium", "high")
 
 
 def load_sources(path: Path) -> dict:
@@ -143,8 +147,45 @@ def enrich(crawler: Crawler, previous: dict | None, today: str) -> None:
         }
 
 
+def detail_bucket(item_id: str) -> str:
+    return hashlib.sha1(item_id.encode("utf-8")).hexdigest()[:2]
+
+
+def split_details(index: dict) -> dict[str, dict]:
+    """Move file lists and finding details out of the catalog, into shards by item id.
+
+    They are most of the data, and a client only needs them on an item's page, while the
+    catalog is downloaded daily and shipped inside the app. Each item keeps a per-rule
+    summary of its findings, so its security is still visible without the details.
+    """
+    shards: dict[str, dict] = {}
+    for kind in ("skills", "plugins"):
+        for item in index[kind]:
+            detail = {"commit": item.get("commit"), "files": item.pop("files", [])}
+            security = item.get("security")
+            if security:
+                findings = security.pop("findings", [])
+                detail["findings"] = findings
+                rules: dict[str, dict] = {}
+                for f in findings:
+                    rule = rules.setdefault(f["rule"], {"count": 0, "severity": "low", "summary": f["summary"]})
+                    rule["count"] += 1
+                    if SEVERITIES.index(f["severity"]) > SEVERITIES.index(rule["severity"]):
+                        rule["severity"] = f["severity"]
+                security["rules"] = rules
+            shards.setdefault(detail_bucket(item["id"]), {})[item["id"]] = detail
+    return shards
+
+
+def details_url(release_repo: str | None, release_tag: str | None) -> str | None:
+    if not (release_repo and release_tag):
+        return None
+    return f"https://github.com/{release_repo}/releases/download/{release_tag}/details-{{bucket}}.json"
+
+
 def build(sources_path: Path, out_dir: Path, fetcher, github, previous: str | None = None,
-          extra_repos: list[str] | None = None, featured_path: Path | None = None) -> dict:
+          extra_repos: list[str] | None = None, featured_path: Path | None = None,
+          release_repo: str | None = None, release_tag: str | None = None) -> dict:
     sources = load_sources(sources_path)
     if featured_path is None:
         featured_path = sources_path.parent / "featured.yaml"
@@ -175,16 +216,31 @@ def build(sources_path: Path, out_dir: Path, fetcher, github, previous: str | No
                    "marketplaces": len(crawler.marketplaces), "repos": len(crawler.repos)},
         "categories": categorize.all_categories(),
         "featured": featured_entries(load_featured(featured_path), crawler),
+        "details": {"buckets": DETAIL_BUCKETS, "url": details_url(release_repo, release_tag)},
         "marketplaces": sorted(crawler.marketplaces.values(), key=lambda m: m["name"]),
         "plugins": sorted(crawler.plugins.values(), key=lambda p: p["id"]),
         "skills": sorted(crawler.skills.values(), key=lambda s: s["id"]),
         "repos": sorted(crawler.repos.values(), key=lambda r: r["slug"].lower()),
         "errors": crawler.errors,
     }
+    summary = summary_markdown(index)
+    shards = split_details(index)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "index.json").write_text(json.dumps(index, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
+    compact = json.dumps(index, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    (out_dir / "index.json").write_bytes(compact)
+    (out_dir / "index.json.gz").write_bytes(gzip.compress(compact, compresslevel=9, mtime=0))
     (out_dir / "index.pretty.json").write_text(json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8")
-    (out_dir / "SUMMARY.md").write_text(summary_markdown(index), encoding="utf-8")
+    (out_dir / "SUMMARY.md").write_text(summary, encoding="utf-8")
+    details_dir = out_dir / "details"
+    details_dir.mkdir(exist_ok=True)
+    for old in details_dir.glob("details-*.json"):
+        old.unlink()
+    for i in range(DETAIL_BUCKETS):
+        bucket = f"{i:02x}"
+        shard = {"schema_version": SCHEMA_VERSION, "generated_at": index["generated_at"],
+                 "items": shards.get(bucket, {})}
+        (details_dir / f"details-{bucket}.json").write_text(
+            json.dumps(shard, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
     return index
 
 
