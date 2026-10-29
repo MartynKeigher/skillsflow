@@ -102,6 +102,10 @@ def test_details_move_to_shards_and_the_catalog_keeps_a_summary(repos, tmp_path)
     assert hooky["security"]["rules"]["pipe-to-shell"]["severity"] == "high"
     assert hooky["security"]["rules"]["pipe-to-shell"]["count"] == 1
     assert hooky["automatic"]["hooks"]  # what runs automatically stays in the catalog
+    skills = {s["id"]: s for s in index["skills"]}
+    pdf_skill = skills["acme/skills:skills/pdf"]
+    assert pdf_skill["file_count"] == 2 and pdf_skill["files_size"] > 0
+    assert len(pdf_skill["skill_md_sha"]) == 40 and len(pdf_skill["files_digest"]) == 40
     assert len(list((out / "details").glob("details-*.json"))) == 256
     shard = json.loads((out / "details" / f"details-{detail_bucket('hooky@acme')}.json").read_text())
     detail = shard["items"]["hooky@acme"]
@@ -125,3 +129,14 @@ def test_detail_bucket_is_two_hex_digits_of_sha1():
     from skillsflow.build import detail_bucket
 
     assert detail_bucket("hooky@acme") == hashlib.sha1(b"hooky@acme").hexdigest()[:2]
+
+
+def test_files_digest_is_order_independent_and_sensitive_to_content():
+    from skillsflow.build import files_digest
+
+    a = [{"path": "b.py", "sha": "2" * 40}, {"path": "SKILL.md", "sha": "1" * 40}]
+    assert files_digest(a) == files_digest(list(reversed(a)))
+    assert files_digest(a) != files_digest([a[0], {"path": "SKILL.md", "sha": "3" * 40}])
+    import hashlib
+    expected = hashlib.sha1(("SKILL.md\0" + "1" * 40 + "\n" + "b.py\0" + "2" * 40 + "\n").encode()).hexdigest()
+    assert files_digest(a) == expected

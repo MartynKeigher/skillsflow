@@ -151,6 +151,15 @@ def detail_bucket(item_id: str) -> str:
     return hashlib.sha1(item_id.encode("utf-8")).hexdigest()[:2]
 
 
+def files_digest(files: list[dict]) -> str:
+    """One SHA-1 over a folder's file paths and hashes, so a client can tell whether anything
+    changed without the file list: SHA-1 of `<path>\\0<sha>\\n` for each file, sorted by path."""
+    h = hashlib.sha1()
+    for f in sorted(files, key=lambda f: f["path"].encode("utf-8")):
+        h.update(f"{f['path']}\0{f['sha']}\n".encode("utf-8"))
+    return h.hexdigest()
+
+
 def split_details(index: dict) -> dict[str, dict]:
     """Move file lists and finding details out of the catalog, into shards by item id.
 
@@ -162,6 +171,12 @@ def split_details(index: dict) -> dict[str, dict]:
     for kind in ("skills", "plugins"):
         for item in index[kind]:
             detail = {"commit": item.get("commit"), "files": item.pop("files", [])}
+            files = detail["files"]
+            item["file_count"] = len(files)
+            item["files_size"] = sum(f["size"] for f in files)
+            item["files_digest"] = files_digest(files)
+            if kind == "skills":
+                item["skill_md_sha"] = next((f["sha"] for f in files if f["path"] == "SKILL.md"), None)
             security = item.get("security")
             if security:
                 findings = security.pop("findings", [])

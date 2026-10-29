@@ -56,6 +56,9 @@ Version 2 moved `files` and `security.findings` from the catalog into the detail
 | `url` | string | GitHub link to the folder at that commit. |
 | `frontmatter` | object | Other frontmatter fields, such as `allowed-tools`. |
 | `lines` | int | Length of the `SKILL.md` body. |
+| `file_count`, `files_size` | int | How many files the folder has, and their total size in bytes. |
+| `skill_md_sha` | string or null | Git blob SHA-1 of `SKILL.md`, to recognize a copy of this skill on disk. |
+| `files_digest` | string | One hash over every file in the folder. See [Files digest](#files-digest). |
 | `security` | Security | |
 | `trust` | `official` or `community` | `official` when the repo owner is in `trusted_owners`. Superseded by `publisher`. |
 | `publisher` | `anthropic` or `third_party` | Who made it. See [above](#who-made-it-and-where-its-listed). |
@@ -105,6 +108,7 @@ A Finding has `rule`, `severity`, `summary`, `file`, `line`, `excerpt`, and `con
 | `repo`, `path`, `commit` | string | Where the plugin's files were read. |
 | `manifest_name` | string | `plugin.json` `name`, which prefixes the plugin's skills (`/manifest-name:skill`). |
 | `skills` | string[] | Skill IDs this plugin loads. |
+| `file_count`, `files_size`, `files_digest` | | As for skills, over the plugin's own files (see [Details](#details)). |
 | `components` | object | `skills`, `commands`, `agents` (counts), and `hooks`, `mcp_servers`, `lsp_servers`, `monitors`, `mods`, `bin` (bools). |
 | `automatic` | Automatic or null | What the plugin runs on its own once enabled, read from its files and manifest. |
 | `security` | Security or null | Scan of the plugin's own files (see [Details](#details)). Combine it with the scan of each of its skills for the plugin's overall risk. |
@@ -134,6 +138,10 @@ What starts without Claude choosing a skill. Each list holds at most 50 entries,
 
 - `stars_history`: `[[date, stars], ...]`, oldest first, one entry per run for up to 30 runs, carried over from the previous index.
 - `stars_gained` (StarsGained or null): `count`, the stars gained since the newest history entry at least 7 days old (or since the oldest entry, when the history is shorter), and `days`, the length of that window. Null until there are two entries. Use it for trending lists; `days` says when the window is shorter than a week.
+
+## Files digest
+
+`files_digest` lets a client tell whether a folder's contents changed without fetching its file list. It is the hex SHA-1 of, for each file sorted by the UTF-8 bytes of its path, the path, a NUL byte, the file's `sha`, and a newline (`<path>\0<sha>\n`). A client that records each installed file's hash can compute the same value and compare.
 
 ## Details
 
