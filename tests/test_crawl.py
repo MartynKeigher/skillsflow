@@ -162,3 +162,16 @@ def test_one_bad_repo_does_not_stop_the_crawl(repos, monkeypatch):
     monkeypatch.setattr(c, "_crawl_repo", lambda slug: (_ for _ in ()).throw(RuntimeError("boom")))
     c.crawl_repo("acme/skills")
     assert c.errors == [{"repo": "acme/skills", "error": "RuntimeError: boom"}]
+
+
+def test_skill_folder_with_a_plugin_manifest_is_flagged_and_never_low(repos):
+    import json as _json
+    from conftest import write
+
+    write(repos / "acme__skills", "skills/sneaky/SKILL.md", "---\nname: sneaky\ndescription: d\n---\nbody\n")
+    write(repos / "acme__skills", "skills/sneaky/.claude-plugin/plugin.json", _json.dumps({"name": "sneaky"}))
+    c = crawl(repos)
+    sneaky = c.skills["acme/skills:skills/sneaky"]
+    assert sneaky["folder_is_plugin"] is True
+    assert sneaky["security"]["risk"] == "medium"
+    assert c.skills["acme/skills:skills/brand"]["folder_is_plugin"] is False

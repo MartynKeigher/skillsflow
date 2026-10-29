@@ -57,6 +57,7 @@ Version 2 moved `files` and `security.findings` from the catalog into the detail
 | `frontmatter` | object | Other frontmatter fields, such as `allowed-tools`. |
 | `lines` | int | Length of the `SKILL.md` body. |
 | `file_count`, `files_size` | int | How many files the folder has, and their total size in bytes. |
+| `folder_is_plugin` | bool | The folder has `.claude-plugin/plugin.json`. Copied into `~/.claude/skills`, Claude Code loads it as a plugin, with any hooks and servers it declares, so its risk is at least `medium`. |
 | `skill_md_sha` | string or null | Git blob SHA-1 of `SKILL.md`, to recognize a copy of this skill on disk. |
 | `files_digest` | string | One hash over every file in the folder. See [Files digest](#files-digest). |
 | `security` | Security | |

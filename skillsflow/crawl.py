@@ -148,6 +148,12 @@ class Crawler:
         if fields.get("when_to_use"):
             description = f"{description} {str(fields['when_to_use']).strip()}".strip()
         scan = security.scan_directory(directory)
+        summary = security.summarize(scan)
+        # Copied into ~/.claude/skills, a folder with a plugin manifest loads as a plugin, with
+        # any hooks and servers it declares, so it never counts as low.
+        folder_is_plugin = (directory / ".claude-plugin" / "plugin.json").is_file()
+        if folder_is_plugin and summary["risk"] == "low":
+            summary["risk"] = "medium"
         owner = checkout.slug.split("/")[0].lower()
         repo = self._note_repo(checkout)
         self.skills[skill_id] = {
@@ -163,7 +169,8 @@ class Crawler:
                                    if k not in ("name", "description")}),
             "lines": body.count("\n") + 1,
             "files": scan["files"],
-            "security": security.summarize(scan),
+            "folder_is_plugin": folder_is_plugin,
+            "security": summary,
             "trust": "official" if owner in self.trusted_owners else "community",
             "publisher": self._publisher(checkout.slug),
             "listed_by_anthropic": False,
