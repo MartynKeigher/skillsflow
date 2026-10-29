@@ -5,10 +5,12 @@
 repos:
   - anthropics/skills
   - anthropics/claude-plugins-official
+  - anthropics/claude-plugins-community
   - anthropics/claude-code
   - obra/superpowers
 
-# Owners whose skills are marked "official".
+# Owners whose work is marked as made by Anthropic (`publisher: anthropic`), and whose
+# marketplaces count as Anthropic's (`listed_by_anthropic`).
 trusted_owners:
   - anthropics
 
@@ -17,7 +19,10 @@ denylist: []
 
 settings:
   follow_external: true
-  max_external_repos: 400
+  # The community marketplace alone points at about 2,000 repositories.
+  max_external_repos: 3000
+  # Parallel clones of a marketplace's external plugin sources.
+  fetch_workers: 12
 
 # GitHub code search for more repos. Needs GITHUB_TOKEN; skipped without one.
 discovery:

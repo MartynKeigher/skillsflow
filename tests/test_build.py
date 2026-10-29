@@ -23,3 +23,62 @@ def test_build_writes_index_and_keeps_first_seen(repos, tmp_path):
     assert skills["acme/skills:skills/unlisted"]["install"]["plugins"] == []
     assert skills["acme/skills:skills/pdf"]["install"]["copy"]["target"] == "~/.claude/skills/pdf"
     assert (out / "SUMMARY.md").read_text().startswith("# SkillsFlow index")
+
+
+def test_featured_picks_keep_order_and_skip_unknown_ids(repos, tmp_path):
+    sources = tmp_path / "sources.yaml"
+    sources.write_text("repos:\n  - acme/skills\ntrusted_owners: [acme]\n")
+    (tmp_path / "featured.yaml").write_text(
+        "featured:\n  - id: hooky@acme\n    note: Hooks done right\n  - id: gone@acme\n  - acme/skills:skills/pdf\n")
+    index = build(sources, tmp_path / "dist", LocalFetcher(repos), None)
+    assert index["featured"] == [
+        {"id": "hooky@acme", "kind": "plugin", "note": "Hooks done right"},
+        {"id": "acme/skills:skills/pdf", "kind": "skill", "note": None},
+    ]
+
+
+def test_skills_are_listed_by_anthropic_through_their_plugins(repos, tmp_path):
+    sources = tmp_path / "sources.yaml"
+    sources.write_text("repos:\n  - acme/skills\ntrusted_owners: [acme]\n")
+    skills = {s["id"]: s for s in build(sources, tmp_path / "dist", LocalFetcher(repos), None)["skills"]}
+    assert skills["acme/skills:skills/pdf"]["listed_by_anthropic"] is True
+    assert skills["acme/skills:skills/unlisted"]["listed_by_anthropic"] is False
+    assert skills["other/tool"]["listed_by_anthropic"] is True
+    assert skills["other/tool"]["publisher"] == "third_party"
+
+
+def test_added_dates_carry_over_from_the_previous_index(repos, tmp_path):
+    sources = tmp_path / "sources.yaml"
+    sources.write_text("repos:\n  - acme/skills\n")
+    previous = tmp_path / "prev.json"
+    previous.write_text(json.dumps({"skills": [{"id": "acme/skills:skills/pdf", "added": "2026-08-01"}],
+                                    "plugins": [{"id": "hooky@acme", "added": "2026-07-01"}]}))
+    index = build(sources, tmp_path / "dist", LocalFetcher(repos), None, previous=str(previous))
+    skills = {s["id"]: s for s in index["skills"]}
+    assert skills["acme/skills:skills/pdf"]["added"] == "2026-08-01"
+    assert skills["acme/skills:skills/brand"]["added"] is None
+    assert {p["id"]: p for p in index["plugins"]}["hooky@acme"]["added"] == "2026-07-01"
+
+
+def test_star_history_and_gain():
+    from skillsflow.build import stars_gained, star_history
+
+    history = star_history({"stars": 130}, {"stars_history": [["2026-10-01", 50], ["2026-10-20", 100],
+                                                              ["2026-10-25", 120], ["2026-10-28", 999]]},
+                           "2026-10-28")
+    # Today's earlier value is replaced, not duplicated.
+    assert history == [["2026-10-01", 50], ["2026-10-20", 100], ["2026-10-25", 120], ["2026-10-28", 130]]
+    assert stars_gained(history, "2026-10-28") == {"count": 30, "days": 8}
+    # Less than a week of history: the window is as long as the history.
+    assert stars_gained([["2026-10-26", 10], ["2026-10-28", 14]], "2026-10-28") == {"count": 4, "days": 2}
+    assert stars_gained([["2026-10-28", 14]], "2026-10-28") is None
+    # No stars this run (no API): history carries over unchanged.
+    assert star_history({"stars": None}, {"stars_history": [["2026-10-27", 5]]}, "2026-10-28") == [["2026-10-27", 5]]
+
+
+def test_star_history_is_capped():
+    from skillsflow.build import HISTORY_DAYS, star_history
+
+    old = [[f"2026-09-{d:02d}", d] for d in range(1, 31)]
+    history = star_history({"stars": 99}, {"stars_history": old}, "2026-10-28")
+    assert len(history) == HISTORY_DAYS and history[-1] == ["2026-10-28", 99]

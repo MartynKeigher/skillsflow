@@ -1,0 +1,21 @@
+# Featured picks shown first in SkillsHub. Each id is a skill id (owner/repo:path) or a plugin id
+# (name@marketplace) from index.json. An id that isn't in the index is skipped with a warning.
+# Order is display order. `note` is an optional one-line reason shown with the pick.
+
+featured:
+  - id: document-skills@anthropic-agent-skills
+    note: Create and edit Word, Excel, PowerPoint and PDF files
+  - id: frontend-design@claude-plugins-official
+    note: Distinctive, production-grade web interfaces
+  - id: code-review@claude-plugins-official
+    note: Review a pull request with several focused agents
+  - id: feature-dev@claude-plugins-official
+    note: A guided workflow for building a feature end to end
+  - id: commit-commands@claude-plugins-official
+    note: Commit, push and open a pull request in one step
+  - id: skill-creator@claude-plugins-official
+    note: Write, test and improve your own skills
+  - id: superpowers@claude-plugins-official
+    note: Brainstorm, plan and test-drive work with a set of disciplined skills
+  - id: context7@claude-plugins-official
+    note: Up-to-date library documentation for Claude

@@ -37,9 +37,48 @@ def test_root_entry_with_skills_loads_only_those(repos):
 def test_plugin_hooks_are_flagged(repos):
     hooky = crawl(repos).plugins["hooky@acme"]
     assert hooky["components"]["hooks"] is True
-    assert hooky["security"]["runs_code_automatically"] == ["hooks"]
+    assert hooky["security"]["runs_code_automatically"] == ["hooks", "mcp_servers", "mods", "bin"]
     assert hooky["security"]["risk"] == "high"  # the hook script pipes curl into sh
     assert hooky["description"] == "Has hooks"
+
+
+def test_plugin_lists_what_runs_automatically(repos):
+    auto = crawl(repos).plugins["hooky@acme"]["automatic"]
+    assert auto["hooks"] == [{"event": "PostToolUse", "matcher": "Write|Edit", "type": "command",
+                              "command": '"${CLAUDE_PLUGIN_ROOT}"/scripts/run.sh', "file": "hooks/hooks.json"}]
+    assert auto["mcp_servers"] == [{"name": "db", "type": "stdio", "command": "node ${CLAUDE_PLUGIN_ROOT}/server.js",
+                                    "env": ["DB_TOKEN"], "file": ".mcp.json"}]
+    assert auto["mods"] == [{"module": "./mods/panel.js", "file": "hooks/hooks.json"}]
+    assert auto["bin"] == ["hooky-cli"]
+    assert auto["lsp_servers"] == [] and auto["monitors"] == []
+
+
+def test_plugin_files_leave_out_only_its_own_skills(repos):
+    c = crawl(repos)
+    hooky = c.plugins["hooky@acme"]
+    paths = {f["path"] for f in hooky["files"]}
+    assert "skills/own/SKILL.md" not in paths  # listed and scanned with the skill itself
+    assert {".claude-plugin/plugin.json", "hooks/hooks.json", "scripts/run.sh", "extras/unloaded/SKILL.md"} <= paths
+    assert all(len(f["sha"]) == 40 for f in hooky["files"])
+    assert any(f["rule"] == "privilege" and f["file"] == "extras/unloaded/SKILL.md" for f in hooky["security"]["findings"])
+    assert hooky["skills"] == ["acme/skills:plugins/hooky/skills/own"]
+
+
+def test_single_skill_plugin_has_no_files_of_its_own(repos):
+    assert crawl(repos).plugins["remote@acme"]["files"] == []
+
+
+def test_publisher_and_listing(repos):
+    c = crawl(repos)
+    assert c.plugins["docs@acme"]["publisher"] == "anthropic"
+    assert c.plugins["docs@acme"]["listed_by_anthropic"] is True
+    # Listed in the trusted marketplace, but made by someone else.
+    assert c.plugins["remote@acme"]["publisher"] == "third_party"
+    assert c.plugins["remote@acme"]["listed_by_anthropic"] is True
+    # Not fetched and not on GitHub: the maker is unknown, so it is never credited to Anthropic.
+    assert c.plugins["npm-one@acme"]["publisher"] == "third_party"
+    assert c.skills["other/tool"]["publisher"] == "third_party"
+    assert c.marketplaces["acme"]["publisher"] == "anthropic"
 
 
 def test_follows_external_github_source(repos):
@@ -72,6 +111,33 @@ def test_denylist(repos):
     c = crawl(repos, denylist=["other/tool"])
     assert c.plugins["remote@acme"]["indexed"] is False
     assert "other/tool" not in c.skills
+
+
+def test_external_sources_are_prefetched_in_parallel_once(repos):
+    class Counting(LocalFetcher):
+        calls = []
+
+        def fetch(self, slug, ref=None):
+            if not self.attempted(slug, ref):
+                self.calls.append((slug, ref))
+            return super().fetch(slug, ref)
+
+    c = Crawler(Counting(repos), None, trusted_owners=["acme"], workers=4)
+    c.crawl_repo("acme/skills")
+    assert sorted(Counting.calls) == [("acme/skills", None), ("other/mono", None), ("other/tool", None)]
+    assert c.plugins["remote@acme"]["indexed"] and c.plugins["subdir@acme"]["indexed"]
+
+
+def test_small_batches_index_the_same_plugins(repos):
+    full = crawl(repos)
+    batched = crawl(repos, batch_size=1)
+    assert {k: v["skills"] for k, v in batched.plugins.items()} == {k: v["skills"] for k, v in full.plugins.items()}
+    assert batched.errors == full.errors
+
+
+def test_prefetch_respects_max_external(repos):
+    c = crawl(repos, max_external=1)
+    assert [c.plugins[p]["indexed"] for p in ("remote@acme", "subdir@acme")] == [True, False]
 
 
 def test_marketplace_record(repos):

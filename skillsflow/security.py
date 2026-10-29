@@ -7,6 +7,7 @@ at before installing.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from dataclasses import dataclass
@@ -73,6 +74,15 @@ RULES.append(Rule("secret-names", "low", "Refers to API keys or tokens by enviro
                   re.compile(r"\b[A-Z][A-Z0-9]*_(API_KEY|SECRET|SECRET_KEY|TOKEN|ACCESS_KEY|PASSWORD)\b|\b(API_KEY|SECRET_KEY|ACCESS_TOKEN|AUTH_TOKEN)\b")))
 
 
+def git_blob_sha(path: Path) -> str:
+    """The SHA-1 git gives the file's contents, so a client can check its own copy against the index."""
+    h = hashlib.sha1(f"blob {path.stat().st_size}\0".encode())
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _is_binary(data: bytes) -> bool:
     return b"\x00" in data[:8192]
 
@@ -117,7 +127,8 @@ def scan_directory(root: Path, *, exclude: set[str] = frozenset()) -> dict:
                 head = fh.read(MAX_SCAN_BYTES)
             kind = classify_file(full, head)
             executable = os.access(full, os.X_OK) and kind != "doc"
-            files.append({"path": rel, "size": size, "kind": kind, "executable": executable})
+            files.append({"path": rel, "size": size, "sha": git_blob_sha(full), "kind": kind,
+                          "executable": executable})
             if kind in ("binary", "archive"):
                 summary = ("Ships a compiled or binary file that cannot be reviewed as text" if kind == "binary"
                            else "Ships an archive whose contents are not scanned")

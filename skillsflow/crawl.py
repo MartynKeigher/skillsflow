@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import posixpath
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import categorize, frontmatter, security
+from . import categorize, components, frontmatter, security
 from .fetch import Checkout, github_slug
 
 log = logging.getLogger(__name__)
@@ -58,8 +59,10 @@ def _author_name(author) -> str | None:
 
 class Crawler:
     def __init__(self, fetcher, github=None, *, trusted_owners=("anthropics",), follow_external=True,
-                 max_external=300, denylist=()):
+                 max_external=300, denylist=(), workers=8, batch_size=100):
         self.fetcher = fetcher
+        self.workers = workers
+        self.batch_size = batch_size
         self.github = github
         self.trusted_owners = {o.lower() for o in trusted_owners}
         self.follow_external = follow_external
@@ -71,6 +74,11 @@ class Crawler:
         self.repos: dict[str, dict] = {}
         self.errors: list[dict] = []
         self._external_fetches = 0
+
+    def _publisher(self, slug: str | None) -> str:
+        """Who made it: the owner of the repository its files come from."""
+        owner = (slug or "").split("/")[0].lower()
+        return "anthropic" if owner and owner in self.trusted_owners else "third_party"
 
     # -- repositories ---------------------------------------------------------
 
@@ -84,6 +92,8 @@ class Crawler:
         except Exception as exc:
             log.exception("crawl of %s failed", slug)
             self.errors.append({"repo": slug, "error": f"{type(exc).__name__}: {exc}"})
+        finally:
+            self.fetcher.release_all()  # everything is read; free the disk before the next repo
 
     def _crawl_repo(self, slug: str) -> None:
         if slug.lower() in self.denylist:
@@ -155,6 +165,9 @@ class Crawler:
             "files": scan["files"],
             "security": security.summarize(scan),
             "trust": "official" if owner in self.trusted_owners else "community",
+            "publisher": self._publisher(checkout.slug),
+            "listed_by_anthropic": False,
+            "added": self.fetcher.added_dates(checkout).get(_join(rel_dir, "SKILL.md")),
             "stars": repo.get("stars"),
             "repo_pushed_at": repo.get("pushed_at"),
             "plugins": [],
@@ -182,17 +195,61 @@ class Crawler:
             "owner": _author_name(data.get("owner")),
             "add_command": f"claude plugin marketplace add {checkout.slug}",
             "trust": "official" if owner in self.trusted_owners else "community",
+            "publisher": self._publisher(checkout.slug),
             "plugins": [],
         }
         plugin_root = (data.get("metadata") or {}).get("pluginRoot")
-        for entry in data["plugins"]:
-            if isinstance(entry, dict) and entry.get("name") and "source" in entry:
-                try:
-                    self._plugin(checkout, name, entry, plugin_root)
-                except Exception as exc:  # one bad entry must not sink the marketplace
-                    log.exception("plugin %s@%s failed", entry.get("name"), name)
-                    self.errors.append({"repo": checkout.slug, "plugin": entry.get("name"),
-                                        "error": f"{type(exc).__name__}: {exc}"})
+        entries = data["plugins"]
+        # In batches, so only one batch of external checkouts is on disk at a time.
+        for start in range(0, len(entries), self.batch_size):
+            batch = entries[start:start + self.batch_size]
+            self._prefetch(checkout, batch)
+            for entry in batch:
+                if isinstance(entry, dict) and entry.get("name") and "source" in entry:
+                    try:
+                        self._plugin(checkout, name, entry, plugin_root)
+                    except Exception as exc:  # one bad entry must not sink the marketplace
+                        log.exception("plugin %s@%s failed", entry.get("name"), name)
+                        self.errors.append({"repo": checkout.slug, "plugin": entry.get("name"),
+                                            "error": f"{type(exc).__name__}: {exc}"})
+            self.fetcher.release_all(keep=checkout)
+
+    def _external_ref(self, checkout: Checkout, source) -> tuple[str, str | None] | None:
+        """(slug, ref) of a source in another repository or at another ref, else None."""
+        if not isinstance(source, dict):
+            return None
+        kind = source.get("source")
+        if kind == "github":
+            slug = source.get("repo")
+        elif kind in ("url", "git-subdir"):
+            slug = github_slug(source.get("url", ""))
+        else:
+            return None
+        ref = source.get("sha") or source.get("ref")
+        if not slug or slug.lower() in self.denylist:
+            return None
+        if slug.lower() == checkout.slug.lower() and ref in (None, checkout.ref, checkout.commit, checkout.branch):
+            return None
+        return slug, ref
+
+    def _prefetch(self, checkout: Checkout, entries: list) -> None:
+        """Fetch a marketplace's external plugin sources in parallel; `_resolve_source` then
+        finds them in the fetcher's cache. Counts toward `max_external` like a serial fetch."""
+        if not self.follow_external or self.workers <= 1:
+            return
+        wanted = []
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("name"):
+                ref = self._external_ref(checkout, entry.get("source"))
+                if ref and ref not in wanted and self.fetcher.cached(*ref) is None:
+                    wanted.append(ref)
+        wanted = wanted[: max(0, self.max_external - self._external_fetches)]
+        self._external_fetches += len(wanted)
+        with ThreadPoolExecutor(max_workers=self.workers) as pool:
+            results = list(pool.map(lambda r: self.fetcher.fetch(*r), wanted))
+        for (slug, ref), result in zip(wanted, results):
+            if result is None:
+                self.errors.append({"repo": slug, "error": f"fetch failed at {ref or 'HEAD'}"})
 
     def _resolve_source(self, checkout: Checkout, source, plugin_root: str | None):
         """Return (checkout or None, path in it or None, descriptor for the index)."""
@@ -220,9 +277,8 @@ class Crawler:
             return None, None, descriptor
         if slug.lower() == checkout.slug.lower() and ref in (None, checkout.ref, checkout.commit, checkout.branch):
             return checkout, path, descriptor
-        cached = self.fetcher.cached(slug, ref)
-        if cached is not None:
-            return cached, path, descriptor
+        if self.fetcher.attempted(slug, ref):
+            return self.fetcher.cached(slug, ref), path, descriptor
         if not self.follow_external or self._external_fetches >= self.max_external:
             return None, None, descriptor
         self._external_fetches += 1
@@ -250,9 +306,15 @@ class Crawler:
             "source": source,
             "install_command": f"claude plugin install {plugin_id}",
             "trust": self.marketplaces[marketplace]["trust"],
+            "publisher": self._publisher(source.get("repo") if source.get("type") not in ("relative", None)
+                                         else mp_checkout.slug),
+            "listed_by_anthropic": self.marketplaces[marketplace]["publisher"] == "anthropic",
+            "added": None,
             "indexed": False,
             "skills": [],
+            "files": [],
             "components": None,
+            "automatic": None,
             "security": None,
         }
         if target is not None and rel_root is not None and (target.path / rel_root).is_dir():
@@ -303,6 +365,9 @@ class Crawler:
         record["repo"] = checkout.slug
         record["path"] = rel_root
         record["commit"] = checkout.commit
+        record["publisher"] = self._publisher(checkout.slug)
+        added = self.fetcher.added_dates(checkout)
+        record["added"] = added.get(_join(rel_root, ".claude-plugin/plugin.json")) or added.get(_join(rel_root, "SKILL.md"))
         self._note_repo(checkout)
 
         for skill_dir in self._plugin_skill_dirs(checkout.path, rel_root, entry, manifest, root_listing):
@@ -315,33 +380,36 @@ class Crawler:
             d = root / sub
             return sum(1 for _ in d.rglob("*.md")) if d.is_dir() else 0
 
-        hooks = (root / "hooks" / "hooks.json").is_file() or bool(m.get("hooks")) or bool(entry.get("hooks"))
-        mcp = (root / ".mcp.json").is_file() or bool(m.get("mcpServers")) or bool(entry.get("mcpServers"))
+        auto = components.automatic(root, manifest, entry)
+        record["automatic"] = auto
+        hooks = bool(auto["hooks"]) or (root / "hooks" / "hooks.json").is_file() or bool(m.get("hooks")) or bool(entry.get("hooks"))
+        mcp = bool(auto["mcp_servers"]) or (root / ".mcp.json").is_file() or bool(m.get("mcpServers")) or bool(entry.get("mcpServers"))
         record["components"] = {
             "skills": len(record["skills"]),
             "commands": count_md("commands") if not (m.get("commands") or entry.get("commands")) else len(_as_list(m.get("commands") or entry.get("commands"))),
             "agents": count_md("agents") if not (m.get("agents") or entry.get("agents")) else len(_as_list(m.get("agents") or entry.get("agents"))),
             "hooks": hooks,
             "mcp_servers": mcp,
-            "lsp_servers": (root / ".lsp.json").is_file() or bool(m.get("lspServers")) or bool(entry.get("lspServers")),
-            "monitors": (root / "monitors" / "monitors.json").is_file() or bool((m.get("experimental") or {}).get("monitors")),
+            "lsp_servers": bool(auto["lsp_servers"]) or (root / ".lsp.json").is_file() or bool(m.get("lspServers")) or bool(entry.get("lspServers")),
+            "monitors": bool(auto["monitors"]) or (root / "monitors" / "monitors.json").is_file() or bool((m.get("experimental") or {}).get("monitors")),
+            "mods": bool(auto["mods"]),
             "bin": (root / "bin").is_dir(),
         }
         record["indexed"] = True
 
         # Hooks, MCP servers, monitors and bin/ run code without Claude choosing a skill, so the
-        # plugin's own files are scanned too, apart from skills which carry their own scan.
+        # plugin's own files are scanned too. Its skills carry their own scan and file list, so
+        # `files` plus each skill's files is everything Claude Code copies at install.
         if any(self.skills[s]["path"] == rel_root for s in record["skills"]):
             files, findings = [], []  # the plugin is a single skill, already scanned
         else:
-            # Every skill folder under the root is skipped: this plugin's own skills carry their
-            # own scan, and skills it doesn't load never run.
-            skill_dirs = {posixpath.relpath(d, rel_root) if rel_root else d
-                          for d in self._find_skill_dirs(checkout.path, rel_root)}
-            scan = security.scan_directory(root, exclude=skill_dirs)
+            own_skills = {posixpath.relpath(self.skills[s]["path"], rel_root) if rel_root else self.skills[s]["path"]
+                          for s in record["skills"]}
+            scan = security.scan_directory(root, exclude=own_skills)
             files, findings = scan["files"], scan["findings"]
+        record["files"] = files
         summary = security.summarize({"files": files, "findings": findings})
-        runs_code = [k for k in ("hooks", "mcp_servers", "lsp_servers", "monitors", "bin") if record["components"][k]]
+        runs_code = [k for k in ("hooks", "mcp_servers", "lsp_servers", "monitors", "mods", "bin") if record["components"][k]]
         if runs_code and summary["risk"] == "low":
             summary["risk"] = "medium"
         summary["runs_code_automatically"] = runs_code
