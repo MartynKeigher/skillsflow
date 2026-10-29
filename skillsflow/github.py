@@ -15,11 +15,16 @@ API = "https://api.github.com"
 
 
 class GitHub:
+    MAX_WAIT = 120  # seconds; a rate limit that resets later than this ends API use for the run
+
     def __init__(self, token: str | None = None):
         self.token = token or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
         self._repo_cache: dict[str, dict | None] = {}
+        self.exhausted = False
 
     def _get(self, path: str, params: dict | None = None) -> dict | None:
+        if self.exhausted:
+            return None
         url = API + path + ("?" + urllib.parse.urlencode(params) if params else "")
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
                    "User-Agent": "skillsflow"}
@@ -34,8 +39,15 @@ class GitHub:
                     time.sleep(min(int(exc.headers["Retry-After"]), 120))
                     continue
                 if exc.code in (403, 429) and exc.headers.get("X-RateLimit-Remaining") == "0":
-                    reset = int(exc.headers.get("X-RateLimit-Reset", time.time() + 60))
-                    time.sleep(max(1, min(reset - time.time(), 120)))
+                    wait = int(exc.headers.get("X-RateLimit-Reset", time.time() + 60)) - time.time()
+                    if wait > self.MAX_WAIT:
+                        # Waiting would stall the crawl for up to an hour per request. Carry on
+                        # without the API: stars and discovery are missing for the rest of the run.
+                        log.warning("GitHub API rate limit reached; resets in %d min. Skipping further API calls.",
+                                    wait // 60)
+                        self.exhausted = True
+                        return None
+                    time.sleep(max(1, wait))
                     continue
                 log.warning("GitHub API %s returned %s", path, exc.code)
                 return None

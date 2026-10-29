@@ -15,7 +15,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # A full crawl, with Anthropic's community marketplace, took 27 minutes in testing.
+    timeout-minutes: 120
     env:
       # A fine-grained token with public read access lets discovery use code search.
       # Without the secret, the workflow token is used and discovery may be skipped.
@@ -31,16 +32,20 @@ jobs:
       - name: Download the previous index
         run: gh release download --repo "$GITHUB_REPOSITORY" --pattern index.json --dir prev || echo "no previous release"
 
+      - name: Pick the release tag
+        # The index links to its detail files in this release, so the tag is known before the build.
+        run: echo "TAG=index-$(date -u +%Y-%m-%d-%H%M)" >> "$GITHUB_ENV"
+
       - name: Build
         run: |
-          args=()
+          args=(--release-repo "$GITHUB_REPOSITORY" --release-tag "$TAG")
           [ -f prev/index.json ] && args+=(--previous prev/index.json)
           python -m skillsflow build --sources sources.yaml --out dist "${args[@]}"
 
       - name: Publish release
         run: |
-          tag="index-$(date -u +%Y-%m-%d-%H%M)"
-          gh release create "$tag" dist/index.json dist/index.pretty.json dist/SUMMARY.md \
+          gh release create "$TAG" dist/index.json dist/index.json.gz dist/index.pretty.json dist/SUMMARY.md \
+            dist/details/details-*.json \
             --repo "$GITHUB_REPOSITORY" --title "Index $(date -u +%Y-%m-%d)" \
             --notes-file dist/SUMMARY.md --latest
 

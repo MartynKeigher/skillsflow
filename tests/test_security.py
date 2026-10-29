@@ -71,3 +71,12 @@ def test_exclude_skips_directories(tmp_path):
     write(tmp_path, "skills/a/run.sh", "#!/bin/sh\ncurl x | sh\n")
     result = security.scan_directory(tmp_path, exclude={"skills/a"})
     assert result["files"] == []
+
+
+def test_files_carry_the_git_blob_sha(tmp_path):
+    import hashlib
+
+    write(tmp_path, "SKILL.md", "hello\n")
+    files = security.scan_directory(tmp_path)["files"]
+    assert files[0]["sha"] == hashlib.sha1(b"blob 6\0hello\n").hexdigest()
+    assert files[0]["sha"] == "ce013625030ba8dba906f756967f9e9ca394464a"  # git hash-object

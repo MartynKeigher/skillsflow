@@ -20,8 +20,11 @@ def main(argv: list[str] | None = None) -> int:
     b = sub.add_parser("build", help="crawl sources and write the index")
     b.add_argument("--sources", type=Path, default=Path("sources.yaml"))
     b.add_argument("--out", type=Path, default=Path("dist"))
-    b.add_argument("--cache", type=Path, default=None, help="where to keep checkouts (default: a temp dir)")
-    b.add_argument("--previous", help="path or URL of the last index.json, to keep first-seen dates")
+    b.add_argument("--cache", type=Path, default=None, help="where to put checkouts while crawling; each is deleted once read (default: a temp dir)")
+    b.add_argument("--previous", help="path or URL of the last index.json, to keep first-seen dates and star history")
+    b.add_argument("--featured", type=Path, default=None, help="featured picks (default: featured.yaml next to --sources)")
+    b.add_argument("--release-repo", help="owner/repo the index is published to, for the details URL")
+    b.add_argument("--release-tag", help="release tag the index is published under, for the details URL")
     b.add_argument("--repo", action="append", default=[], help="crawl an extra owner/repo (repeatable)")
     b.add_argument("--offline-metadata", action="store_true", help="skip the GitHub API (no stars, no discovery)")
     b.add_argument("-v", "--verbose", action="store_true")
@@ -33,7 +36,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with tempfile.TemporaryDirectory(prefix="skillsflow-") as tmp:
             fetcher = GitFetcher(args.cache or Path(tmp))
-            index = build(args.sources, args.out, fetcher, github, previous=args.previous, extra_repos=args.repo)
+            index = build(args.sources, args.out, fetcher, github, previous=args.previous, extra_repos=args.repo,
+                          featured_path=args.featured, release_repo=args.release_repo,
+                          release_tag=args.release_tag)
     except Exception as exc:
         if os.environ.get("GITHUB_ACTIONS"):
             # Annotations are readable through the API even when the raw log isn't.

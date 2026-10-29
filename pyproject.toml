@@ -1,6 +1,6 @@
 [project]
 name = "skillsflow"
-version = "0.1.0"
+version = "0.2.0"
 description = "Builds the SkillsHub catalog of Claude Skills and Claude Code plugins"
 readme = "README.md"
 license = "MIT"

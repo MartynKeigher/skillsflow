@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import gzip
+import hashlib
 import json
 import logging
 import urllib.request
@@ -14,6 +16,11 @@ from . import SCHEMA_VERSION, __version__, categorize
 from .crawl import Crawler
 
 log = logging.getLogger(__name__)
+
+HISTORY_DAYS = 30
+TREND_DAYS = 7
+DETAIL_BUCKETS = 256  # two hex digits of the SHA-1 of an item's id
+SEVERITIES = ("low", "medium", "high")
 
 
 def load_sources(path: Path) -> dict:
@@ -61,22 +68,74 @@ def discover(github, discovery: dict) -> list[str]:
     return kept[: discovery.get("max_repos", 300)]
 
 
+def load_featured(path: Path | None) -> list[dict]:
+    if not path or not path.is_file():
+        return []
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return [e if isinstance(e, dict) else {"id": str(e)} for e in data.get("featured") or []]
+
+
+def featured_entries(entries: list[dict], crawler: Crawler) -> list[dict]:
+    """Featured picks that are in this index, in the file's order."""
+    out = []
+    for entry in entries:
+        item_id = str(entry.get("id", ""))
+        kind = "plugin" if item_id in crawler.plugins else "skill" if item_id in crawler.skills else None
+        if kind is None:
+            log.warning("featured id %r is not in the index", item_id)
+            continue
+        out.append({"id": item_id, "kind": kind, "note": entry.get("note")})
+    return out
+
+
+def star_history(repo: dict, previous_repo: dict | None, today: str) -> list[list]:
+    """[[date, stars], ...], oldest first, at most HISTORY_DAYS entries, carried between runs."""
+    history = [h for h in (previous_repo or {}).get("stars_history") or [] if h[0] < today]
+    if repo.get("stars") is not None:
+        history.append([today, repo["stars"]])
+    return history[-HISTORY_DAYS:]
+
+
+def stars_gained(history: list[list], today: str) -> dict | None:
+    """Stars gained over about a week: since the newest entry at least 7 days old, else since
+    the oldest entry. `days` says how long the window really is."""
+    if len(history) < 2:
+        return None
+    now = dt.date.fromisoformat(today)
+    older = [h for h in history[:-1] if (now - dt.date.fromisoformat(h[0])).days >= TREND_DAYS]
+    base = older[-1] if older else history[0]
+    return {"count": history[-1][1] - base[1], "days": (now - dt.date.fromisoformat(base[0])).days}
+
+
 def enrich(crawler: Crawler, previous: dict | None, today: str) -> None:
-    seen = {}
+    seen, added = {}, {}
+    previous_repos = {}
     if previous:
         for kind in ("skills", "plugins"):
             for item in previous.get(kind, []):
                 if item.get("first_seen"):
                     seen[(kind, item["id"])] = item["first_seen"]
+                if item.get("added"):
+                    added[(kind, item["id"])] = item["added"]
+        previous_repos = {r["slug"].lower(): r for r in previous.get("repos", []) if r.get("slug")}
+    for key, repo in crawler.repos.items():
+        repo["stars_history"] = star_history(repo, previous_repos.get(key), today)
+        repo["stars_gained"] = stars_gained(repo["stars_history"], today)
     for plugin in crawler.plugins.values():
         plugin["first_seen"] = seen.get(("plugins", plugin["id"]), today)
+        # A file added before the history window has no date this run; keep an earlier finding.
+        plugin["added"] = plugin.get("added") or added.get(("plugins", plugin["id"]))
         if plugin["category"] is None:
             plugin["category"] = categorize.categorize(plugin["name"], plugin.get("description") or "")
         if plugin.get("repo"):
             repo = crawler.repos.get(plugin["repo"].lower(), {})
             plugin["stars"] = repo.get("stars")
+            plugin["stars_gained"] = repo.get("stars_gained")
     for skill in crawler.skills.values():
         skill["first_seen"] = seen.get(("skills", skill["id"]), today)
+        skill["added"] = skill.get("added") or added.get(("skills", skill["id"]))
+        skill["stars_gained"] = crawler.repos.get(skill["repo"].lower(), {}).get("stars_gained")
+        skill["listed_by_anthropic"] = any(crawler.plugins[p]["listed_by_anthropic"] for p in skill["plugins"])
         plugin_cats = [crawler.plugins[p]["marketplace_category"] for p in skill["plugins"]
                        if crawler.plugins[p].get("marketplace_category")]
         skill["category"] = categorize.categorize(skill["name"], skill["description"],
@@ -88,9 +147,63 @@ def enrich(crawler: Crawler, previous: dict | None, today: str) -> None:
         }
 
 
+def detail_bucket(item_id: str) -> str:
+    return hashlib.sha1(item_id.encode("utf-8")).hexdigest()[:2]
+
+
+def files_digest(files: list[dict]) -> str:
+    """One SHA-1 over a folder's file paths and hashes, so a client can tell whether anything
+    changed without the file list: SHA-1 of `<path>\\0<sha>\\n` for each file, sorted by path."""
+    h = hashlib.sha1()
+    for f in sorted(files, key=lambda f: f["path"].encode("utf-8")):
+        h.update(f"{f['path']}\0{f['sha']}\n".encode("utf-8"))
+    return h.hexdigest()
+
+
+def split_details(index: dict) -> dict[str, dict]:
+    """Move file lists and finding details out of the catalog, into shards by item id.
+
+    They are most of the data, and a client only needs them on an item's page, while the
+    catalog is downloaded daily and shipped inside the app. Each item keeps a per-rule
+    summary of its findings, so its security is still visible without the details.
+    """
+    shards: dict[str, dict] = {}
+    for kind in ("skills", "plugins"):
+        for item in index[kind]:
+            detail = {"commit": item.get("commit"), "files": item.pop("files", [])}
+            files = detail["files"]
+            item["file_count"] = len(files)
+            item["files_size"] = sum(f["size"] for f in files)
+            item["files_digest"] = files_digest(files)
+            if kind == "skills":
+                item["skill_md_sha"] = next((f["sha"] for f in files if f["path"] == "SKILL.md"), None)
+            security = item.get("security")
+            if security:
+                findings = security.pop("findings", [])
+                detail["findings"] = findings
+                rules: dict[str, dict] = {}
+                for f in findings:
+                    rule = rules.setdefault(f["rule"], {"count": 0, "severity": "low", "summary": f["summary"]})
+                    rule["count"] += 1
+                    if SEVERITIES.index(f["severity"]) > SEVERITIES.index(rule["severity"]):
+                        rule["severity"] = f["severity"]
+                security["rules"] = rules
+            shards.setdefault(detail_bucket(item["id"]), {})[item["id"]] = detail
+    return shards
+
+
+def details_url(release_repo: str | None, release_tag: str | None) -> str | None:
+    if not (release_repo and release_tag):
+        return None
+    return f"https://github.com/{release_repo}/releases/download/{release_tag}/details-{{bucket}}.json"
+
+
 def build(sources_path: Path, out_dir: Path, fetcher, github, previous: str | None = None,
-          extra_repos: list[str] | None = None) -> dict:
+          extra_repos: list[str] | None = None, featured_path: Path | None = None,
+          release_repo: str | None = None, release_tag: str | None = None) -> dict:
     sources = load_sources(sources_path)
+    if featured_path is None:
+        featured_path = sources_path.parent / "featured.yaml"
     settings = sources["settings"]
     crawler = Crawler(
         fetcher, github,
@@ -98,6 +211,7 @@ def build(sources_path: Path, out_dir: Path, fetcher, github, previous: str | No
         follow_external=settings.get("follow_external", True),
         max_external=settings.get("max_external_repos", 300),
         denylist=sources["denylist"],
+        workers=settings.get("fetch_workers", 8),
     )
     repos = list(dict.fromkeys(list(sources["repos"]) + (extra_repos or [])))
     if github is not None:
@@ -116,16 +230,32 @@ def build(sources_path: Path, out_dir: Path, fetcher, github, previous: str | No
         "counts": {"skills": len(crawler.skills), "plugins": len(crawler.plugins),
                    "marketplaces": len(crawler.marketplaces), "repos": len(crawler.repos)},
         "categories": categorize.all_categories(),
+        "featured": featured_entries(load_featured(featured_path), crawler),
+        "details": {"buckets": DETAIL_BUCKETS, "url": details_url(release_repo, release_tag)},
         "marketplaces": sorted(crawler.marketplaces.values(), key=lambda m: m["name"]),
         "plugins": sorted(crawler.plugins.values(), key=lambda p: p["id"]),
         "skills": sorted(crawler.skills.values(), key=lambda s: s["id"]),
         "repos": sorted(crawler.repos.values(), key=lambda r: r["slug"].lower()),
         "errors": crawler.errors,
     }
+    summary = summary_markdown(index)
+    shards = split_details(index)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "index.json").write_text(json.dumps(index, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
+    compact = json.dumps(index, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    (out_dir / "index.json").write_bytes(compact)
+    (out_dir / "index.json.gz").write_bytes(gzip.compress(compact, compresslevel=9, mtime=0))
     (out_dir / "index.pretty.json").write_text(json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8")
-    (out_dir / "SUMMARY.md").write_text(summary_markdown(index), encoding="utf-8")
+    (out_dir / "SUMMARY.md").write_text(summary, encoding="utf-8")
+    details_dir = out_dir / "details"
+    details_dir.mkdir(exist_ok=True)
+    for old in details_dir.glob("details-*.json"):
+        old.unlink()
+    for i in range(DETAIL_BUCKETS):
+        bucket = f"{i:02x}"
+        shard = {"schema_version": SCHEMA_VERSION, "generated_at": index["generated_at"],
+                 "items": shards.get(bucket, {})}
+        (details_dir / f"details-{bucket}.json").write_text(
+            json.dumps(shard, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
     return index
 
 

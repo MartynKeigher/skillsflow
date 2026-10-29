@@ -1,12 +1,33 @@
-# index.json schema (version 1)
+# index.json schema (version 2)
 
-`index.json` is one JSON object. `index.pretty.json` is the same data, indented. IDs are stable across runs, so the app can track installs and "first seen" dates by ID.
+Each release publishes:
+
+| File | What it is |
+|---|---|
+| `index.json` | The catalog: one JSON object, described below. |
+| `index.json.gz` | The same bytes, gzip-compressed. About a sixth of the size; download this one. |
+| `index.pretty.json` | The same data, indented, for reading. |
+| `details-00.json` … `details-ff.json` | File lists and full security findings, in 256 shards. See [Details](#details). |
+| `SUMMARY.md` | Counts for the release notes. |
+
+IDs are stable across runs, so the app can track installs and "first seen" dates by ID. Fields are only ever added within a schema version, so a reader should ignore fields it doesn't know.
+
+Version 2 moved `files` and `security.findings` from the catalog into the detail shards, because they were most of its size, and added `security.rules` to summarize findings in the catalog. Everything else is as in version 1.
+
+## Who made it and where it's listed
+
+`publisher` and `listed_by_anthropic` answer two different questions, and a client should show them separately:
+
+- `publisher` is who made the item: `anthropic` when the repository its files come from belongs to an owner in `trusted_owners`, otherwise `third_party`. A plugin whose files weren't fetched and whose source isn't a GitHub repository is `third_party`, because its maker is unknown.
+- `listed_by_anthropic` is whether the item is in a marketplace whose repository Anthropic owns, such as `claude-plugins-official` or `claude-community`. Most plugins listed there are made by partners and other authors, so this doesn't mean Anthropic made or reviewed it.
+
+`trust` is the older single field. For plugins it is the marketplace's trust level, so a third-party plugin in Anthropic's marketplace reads `official`. Use `publisher` and `listed_by_anthropic` instead.
 
 ## Top level
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | int | `1`. Bumped on breaking changes. |
+| `schema_version` | int | `2`. Bumped on breaking changes. |
 | `generated_at` | string | UTC ISO 8601 timestamp. |
 | `generator` | string | e.g. `skillsflow 0.1.0`. |
 | `counts` | object | `skills`, `plugins`, `marketplaces`, `repos`. |
@@ -15,7 +36,13 @@
 | `plugins` | Plugin[] | |
 | `skills` | Skill[] | |
 | `repos` | Repo[] | |
+| `featured` | Featured[] | Curated picks from `featured.yaml`, in display order. |
+| `details` | object | `buckets` (256) and `url`: the URL of a detail shard in this release, with `{bucket}` to replace. Null for a local build. |
 | `errors` | object[] | Repos or entries that failed, with `repo` and `error`. |
+
+### Featured
+
+`id` (a skill or plugin ID in this index), `kind` (`skill` or `plugin`), and `note` (a one-line reason, or null). IDs that aren't in the index are left out.
 
 ## Skill
 
@@ -29,19 +56,28 @@
 | `url` | string | GitHub link to the folder at that commit. |
 | `frontmatter` | object | Other frontmatter fields, such as `allowed-tools`. |
 | `lines` | int | Length of the `SKILL.md` body. |
-| `files` | File[] | Every file in the skill folder. |
+| `file_count`, `files_size` | int | How many files the folder has, and their total size in bytes. |
+| `folder_is_plugin` | bool | The folder has `.claude-plugin/plugin.json`. Copied into `~/.claude/skills`, Claude Code loads it as a plugin, with any hooks and servers it declares, so its risk is at least `medium`. |
+| `skill_md_sha` | string or null | Git blob SHA-1 of `SKILL.md`, to recognize a copy of this skill on disk. |
+| `files_digest` | string | One hash over every file in the folder. See [Files digest](#files-digest). |
 | `security` | Security | |
-| `trust` | `official` or `community` | `official` when the repo owner is in `trusted_owners`. |
-| `stars`, `repo_pushed_at` | int / string or null | From the GitHub API, when available. |
+| `trust` | `official` or `community` | `official` when the repo owner is in `trusted_owners`. Superseded by `publisher`. |
+| `publisher` | `anthropic` or `third_party` | Who made it. See [above](#who-made-it-and-where-its-listed). |
+| `listed_by_anthropic` | bool | Whether a plugin that loads this skill is in a marketplace Anthropic owns. |
+| `stars`, `repo_pushed_at` | int / string or null | From the GitHub API, when available. Stars are the repository's, shared by every skill in it. |
+| `stars_gained` | StarsGained or null | Stars the repository gained recently. See [Repo](#repo). |
 | `plugins` | string[] | IDs of plugins that load this skill. |
 | `category` | string | |
-| `first_seen` | string | `YYYY-MM-DD`. |
+| `first_seen` | string | `YYYY-MM-DD`, the first day this skill was in the index. |
+| `added` | string or null | `YYYY-MM-DD`, when the commit that added its `SKILL.md` was made. Null when that was before the history SkillsFlow reads (about 120 days), so the skill isn't new. Once found, it carries over between runs. |
 | `install.plugins` | string[] | `claude plugin install …` commands. Empty if the skill isn't in a plugin. |
 | `install.copy` | object | `repo`, `path`, `commit`, and `target` (`~/.claude/skills/<folder>`), for installing the folder directly. |
 
 ### File
 
-`path` (relative to the skill folder), `size` (bytes), `kind` (`doc`, `script`, `data`, `asset`, `archive`, `binary`), `executable` (bool).
+`path` (relative to the skill or plugin folder), `size` (bytes), `sha` (the git blob SHA-1 of the contents, as `git hash-object` prints it: SHA-1 of `blob <size>\0` followed by the bytes), `kind` (`doc`, `script`, `data`, `asset`, `archive`, `binary`), `executable` (bool).
+
+A client can hash a downloaded or installed file the same way to check it matches the index, or to tell whether a user has edited it.
 
 ### Security
 
@@ -49,8 +85,8 @@
 |---|---|---|
 | `risk` | `low`, `medium`, `high` | See the README for how it's set. |
 | `scripts`, `binaries` | int | Counts of script files and binary or archive files. |
-| `findings` | Finding[] | At most 5 per rule. |
-| `runs_code_automatically` | string[] | Plugins only: any of `hooks`, `mcp_servers`, `lsp_servers`, `monitors`, `bin`. |
+| `rules` | object | Rule ID to `count`, `severity` (the worst of its findings) and `summary`. A summary of the findings, which are in the detail shard. |
+| `runs_code_automatically` | string[] | Plugins only: any of `hooks`, `mcp_servers`, `lsp_servers`, `monitors`, `mods`, `bin`. |
 
 A Finding has `rule`, `severity`, `summary`, `file`, `line`, `excerpt`, and `context` (`code`, `comment`, `documentation`, `file`).
 
@@ -66,19 +102,59 @@ A Finding has `rule`, `severity`, `summary`, `file`, `line`, `excerpt`, and `con
 | `tags` | string[] | Entry `tags`/`keywords` plus `plugin.json` `keywords`. |
 | `source` | object | `type` (`relative`, `github`, `url`, `git-subdir`, `npm`, `archive`, `command`) and its fields. |
 | `install_command` | string | `claude plugin install <id>`. |
-| `trust` | string | The marketplace's trust level. |
+| `trust` | string | The marketplace's trust level. Superseded by `publisher` and `listed_by_anthropic`. |
+| `publisher` | `anthropic` or `third_party` | Who made it, from the repository its files come from. |
+| `listed_by_anthropic` | bool | Whether its marketplace's repository is Anthropic's. |
 | `indexed` | bool | Whether SkillsFlow fetched the plugin's files. When `false`, the fields below are empty. |
 | `repo`, `path`, `commit` | string | Where the plugin's files were read. |
 | `manifest_name` | string | `plugin.json` `name`, which prefixes the plugin's skills (`/manifest-name:skill`). |
 | `skills` | string[] | Skill IDs this plugin loads. |
-| `components` | object | `skills`, `commands`, `agents` (counts), and `hooks`, `mcp_servers`, `lsp_servers`, `monitors`, `bin` (bools). |
-| `security` | Security or null | Scan of the plugin's files outside its skill folders. |
-| `stars`, `first_seen` | | As for skills. |
+| `file_count`, `files_size`, `files_digest` | | As for skills, over the plugin's own files (see [Details](#details)). |
+| `components` | object | `skills`, `commands`, `agents` (counts), and `hooks`, `mcp_servers`, `lsp_servers`, `monitors`, `mods`, `bin` (bools). |
+| `automatic` | Automatic or null | What the plugin runs on its own once enabled, read from its files and manifest. |
+| `security` | Security or null | Scan of the plugin's own files (see [Details](#details)). Combine it with the scan of each of its skills for the plugin's overall risk. |
+| `stars`, `stars_gained`, `first_seen` | | As for skills. |
+| `added` | string or null | As for skills, from the plugin's `.claude-plugin/plugin.json`, or `SKILL.md` for a single-skill plugin. Null when neither date is known. |
+
+### Automatic
+
+What starts without Claude choosing a skill. Each list holds at most 50 entries, and each `command` at most 500 characters. `file` is where the entry is declared, relative to the plugin folder; inline manifest values read `.claude-plugin/plugin.json`.
+
+| Field | Entries |
+|---|---|
+| `hooks` | `event`, `matcher` (or null), `type` (`command`, `http`, `prompt`, `agent`, …), `command` (the command line, URL or prompt), `file` |
+| `mcp_servers` | `name`, `type` (`stdio`, `http`, `sse`), `command` (command line or URL), `env` (variable names only), `file` |
+| `lsp_servers` | `name`, `type`, `command`, `env`, `file` |
+| `monitors` | `name`, `command`, `file` |
+| `mods` | `module` (JavaScript module that runs inside Claude Code), `file` |
+| `bin` | File names in `bin/`, which Claude can run as commands |
 
 ## Marketplace
 
-`name`, `repo`, `commit`, `description`, `owner`, `trust`, `add_command` (`claude plugin marketplace add owner/repo`), and `plugins` (plugin IDs).
+`name`, `repo`, `commit`, `description`, `owner`, `trust`, `publisher` (`anthropic` when the marketplace repository is Anthropic's), `add_command` (`claude plugin marketplace add owner/repo`), and `plugins` (plugin IDs).
 
 ## Repo
 
 `slug`, `commit`, and, when the GitHub API is available, `description`, `stars`, `forks`, `pushed_at`, `archived`, `fork`, `license`, `default_branch`, `topics`, `owner_type`.
+
+- `stars_history`: `[[date, stars], ...]`, oldest first, one entry per run for up to 30 runs, carried over from the previous index.
+- `stars_gained` (StarsGained or null): `count`, the stars gained since the newest history entry at least 7 days old (or since the oldest entry, when the history is shorter), and `days`, the length of that window. Null until there are two entries. Use it for trending lists; `days` says when the window is shorter than a week.
+
+## Files digest
+
+`files_digest` lets a client tell whether a folder's contents changed without fetching its file list. It is the hex SHA-1 of, for each file sorted by the UTF-8 bytes of its path, the path, a NUL byte, the file's `sha`, and a newline (`<path>\0<sha>\n`). A client that records each installed file's hash can compute the same value and compare.
+
+## Details
+
+Shard `details-<bb>.json`, where `<bb>` is the first two hex digits of the SHA-1 of the item's ID (UTF-8), holds:
+
+```json
+{"schema_version": 2, "generated_at": "…", "items": {"<id>": {"commit": "…", "files": [File, …], "findings": [Finding, …]}}}
+```
+
+- For a skill, `files` is every file in its folder.
+- For a plugin, `files` is every file in the plugin folder except those inside the folders of its own `skills`, which each skill lists. Together they are everything Claude Code copies when it installs the plugin. Empty when the plugin is a single skill at its root.
+- `findings` is the scan of those files, at most 5 per rule. A Finding has `rule`, `severity`, `summary`, `file`, `line`, `excerpt`, and `context` (`code`, `comment`, `documentation`, `file`).
+- `commit` matches the item's `commit` in the catalog of the same release. When it doesn't, the shard belongs to another release.
+
+Releases older than the 30 newest are deleted, so a client holding an old catalog should fetch a newer one when its shard URL is gone.
